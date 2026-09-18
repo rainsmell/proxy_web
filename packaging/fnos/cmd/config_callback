@@ -1,0 +1,3 @@
+#!/bin/bash
+# fnOS calls this after application settings change. The service reads TRIM_SERVICE_PORT at next start.
+exit 0

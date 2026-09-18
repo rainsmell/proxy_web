@@ -13,12 +13,16 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+var appVersion = "dev"
 
 type Node struct {
 	ID          string    `json:"id"`
@@ -51,20 +55,25 @@ type Subscription struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 type Config struct {
-	ListenAddress string         `json:"listenAddress"`
-	SocksPort     int            `json:"socksPort"`
-	HTTPPort      int            `json:"httpPort"`
-	Subscriptions []Subscription `json:"subscriptions"`
+	ListenAddress  string         `json:"listenAddress"`
+	SocksPort      int            `json:"socksPort"`
+	HTTPPort       int            `json:"httpPort"`
+	DomainStrategy string         `json:"domainStrategy"`
+	LogLevel       string         `json:"logLevel"`
+	Subscriptions  []Subscription `json:"subscriptions"`
 }
 type State struct {
-	Running   bool      `json:"running"`
-	PID       int       `json:"pid,omitempty"`
-	NodeID    string    `json:"nodeId,omitempty"`
-	NodeName  string    `json:"nodeName,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	SocksPort int       `json:"socksPort,omitempty"`
-	HTTPPort  int       `json:"httpPort,omitempty"`
-	StartedAt time.Time `json:"startedAt,omitempty"`
+	Running      bool      `json:"running"`
+	PID          int       `json:"pid,omitempty"`
+	NodeID       string    `json:"nodeId,omitempty"`
+	NodeName     string    `json:"nodeName,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	SocksPort    int       `json:"socksPort,omitempty"`
+	HTTPPort     int       `json:"httpPort,omitempty"`
+	ConfigPath   string    `json:"configPath,omitempty"`
+	ConfigFormat string    `json:"configFormat,omitempty"`
+	Version      string    `json:"version,omitempty"`
+	StartedAt    time.Time `json:"startedAt,omitempty"`
 }
 type Connection struct {
 	ID     string `json:"id"`
@@ -81,7 +90,7 @@ type TestProgress struct {
 	Error       string `json:"error,omitempty"`
 }
 
-var cfg = Config{ListenAddress: "0.0.0.0", SocksPort: 10808, HTTPPort: 10809}
+var cfg = Config{ListenAddress: "0.0.0.0", SocksPort: 10808, HTTPPort: 10809, DomainStrategy: "AsIs", LogLevel: "info"}
 var dataDir = "data"
 var storeMu, procMu, progressMu sync.Mutex
 var running *exec.Cmd
@@ -89,21 +98,132 @@ var state State
 var progress = map[string]TestProgress{}
 
 func main() {
-	dataDir = filepath.Join(appRoot(), "data")
+	dataDir = resolveDataDir()
+	installSignalHandler()
 	_ = os.MkdirAll(filepath.Join(dataDir, "runtime"), 0755)
 	loadConfig()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/", api)
-	mux.HandleFunc("/", index)
-	addr := os.Getenv("V2RAY_WEB_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-	log.Printf("web server listening on %s", addr)
-	if err := http.ListenAndServe(addr, logging(mux)); err != nil {
+	handler := newHTTPHandler()
+	if err := serveHTTP(handler); err != nil {
 		log.Fatal(err)
 	}
 }
+
+func newHTTPHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/", api)
+	mux.HandleFunc("/healthz", healthz)
+	mux.HandleFunc("/", index)
+	return logging(stripBasePath(mux))
+}
+
+func serveHTTP(handler http.Handler) error {
+	if sock := resolveUnixSocket(); sock != "" {
+		_ = os.Remove(sock)
+		l, err := net.Listen("unix", sock)
+		if err != nil {
+			return err
+		}
+		_ = os.Chmod(sock, 0666)
+		log.Printf("web server listening on unix socket %s, basePath=%s, dataDir=%s, appRoot=%s", sock, gatewayBasePath(), dataDir, appRoot())
+		return http.Serve(l, handler)
+	}
+
+	addr := resolveListenAddr()
+	log.Printf("web server listening on %s, basePath=%s, dataDir=%s, appRoot=%s", addr, gatewayBasePath(), dataDir, appRoot())
+	return http.ListenAndServe(addr, handler)
+}
+
+func resolveDataDir() string {
+	if v := strings.TrimSpace(os.Getenv("TRIM_PKGVAR")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("V2RAY_WEB_DATA_DIR")); v != "" {
+		return v
+	}
+	return filepath.Join(appRoot(), "data")
+}
+
+func resolveListenAddr() string {
+	if v := strings.TrimSpace(os.Getenv("V2RAY_WEB_ADDR")); v != "" {
+		return v
+	}
+	if p := strings.TrimSpace(os.Getenv("TRIM_SERVICE_PORT")); p != "" {
+		return ":" + p
+	}
+	return ":8080"
+}
+
+func resolveUnixSocket() string {
+	v := strings.TrimSpace(os.Getenv("V2RAY_WEB_UNIX_SOCKET"))
+	if v == "" {
+		return ""
+	}
+	if filepath.IsAbs(v) {
+		return v
+	}
+	if dest := strings.TrimSpace(os.Getenv("TRIM_APPDEST")); dest != "" {
+		return filepath.Join(dest, v)
+	}
+	return v
+}
+
+func gatewayBasePath() string {
+	v := strings.TrimSpace(os.Getenv("V2RAY_WEB_BASE_PATH"))
+	if v == "" || v == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
+	}
+	return strings.TrimRight(v, "/")
+}
+
+func stripBasePath(next http.Handler) http.Handler {
+	base := gatewayBasePath()
+	if base == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == base {
+			r2 := r.Clone(r.Context())
+			u := *r.URL
+			u.Path = "/"
+			r2.URL = &u
+			next.ServeHTTP(w, r2)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, base+"/") {
+			r2 := r.Clone(r.Context())
+			u := *r.URL
+			u.Path = strings.TrimPrefix(r.URL.Path, base)
+			if u.Path == "" {
+				u.Path = "/"
+			}
+			r2.URL = &u
+			next.ServeHTTP(w, r2)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func renderPageHTML() string {
+	b, _ := json.Marshal(gatewayBasePath())
+	inject := "<script>window.__BASE_PATH__=" + string(b) + ";</script>"
+	return strings.Replace(pageHTML, "</head>", inject+"\n</head>", 1)
+}
+
+func installSignalHandler() {
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("shutdown signal received; stopping v2ray child process if running")
+		stopProxyInternal()
+		os.Exit(0)
+	}()
+}
+
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t := time.Now()
@@ -111,13 +231,22 @@ func logging(next http.Handler) http.Handler {
 		log.Printf("%s %s (%s)", r.Method, r.URL.Path, time.Since(t).Round(time.Millisecond))
 	})
 }
+
+func healthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonOut(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"ok": true, "version": appVersion, "time": time.Now()})
+}
+
 func index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, pageHTML)
+	io.WriteString(w, renderPageHTML())
 }
 func jsonOut(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -140,6 +269,12 @@ func loadConfig() {
 	}
 	if cfg.HTTPPort == 0 {
 		cfg.HTTPPort = 10809
+	}
+	if cfg.DomainStrategy == "" || cfg.DomainStrategy == "UseIPv4" {
+		cfg.DomainStrategy = "AsIs"
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
 	}
 }
 func saveConfig() error {
@@ -175,13 +310,21 @@ func api(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, cfg)
 	case p == "config" && r.Method == "PUT":
 		var c Config
-		if bodyJSON(r, &c) != nil || c.SocksPort < 1 || c.SocksPort > 65535 || c.HTTPPort < 1 || c.HTTPPort > 65535 {
+		if bodyJSON(r, &c) != nil || c.SocksPort < 1 || c.SocksPort > 65535 || c.HTTPPort < 1 || c.HTTPPort > 65535 || !validDomainStrategy(c.DomainStrategy) || !validLogLevel(c.LogLevel) {
 			jsonOut(w, 400, map[string]string{"error": "invalid config or port"})
 			return
 		}
 		cfg.ListenAddress = c.ListenAddress
 		cfg.SocksPort = c.SocksPort
 		cfg.HTTPPort = c.HTTPPort
+		cfg.DomainStrategy = c.DomainStrategy
+		if cfg.DomainStrategy == "" || cfg.DomainStrategy == "UseIPv4" {
+			cfg.DomainStrategy = "AsIs"
+		}
+		cfg.LogLevel = c.LogLevel
+		if cfg.LogLevel == "" {
+			cfg.LogLevel = "info"
+		}
 		_ = saveConfig()
 		jsonOut(w, 200, cfg)
 	case p == "subscriptions" && r.Method == "GET":
@@ -247,6 +390,24 @@ func api(w http.ResponseWriter, r *http.Request) {
 		stopProxy(w)
 	default:
 		jsonOut(w, 404, map[string]string{"error": "not found"})
+	}
+}
+
+func validDomainStrategy(v string) bool {
+	switch v {
+	case "", "AsIs", "UseIP", "UseIPv4", "UseIPv6":
+		return true
+	default:
+		return false
+	}
+}
+
+func validLogLevel(v string) bool {
+	switch v {
+	case "", "debug", "info", "warning", "error", "none":
+		return true
+	default:
+		return false
 	}
 }
 

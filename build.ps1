@@ -1,5 +1,6 @@
 param(
-    [string]$OutDir = "release"
+    [string]$OutDir = "release",
+    [string]$Version = "dev"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,11 +19,11 @@ $env:CGO_ENABLED = "0"
 
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags "-s -w" -o "$OutDir\windows\v2ray-web.exe" .
+go build -trimpath -ldflags "-s -w -X main.appVersion=$Version" -o "$OutDir\windows\v2ray-web.exe" .
 
 $env:GOOS = "linux"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags "-s -w" -o "$OutDir\linux\v2ray-web" .
+go build -trimpath -ldflags "-s -w -X main.appVersion=$Version" -o "$OutDir\linux\v2ray-web" .
 
 Copy-Item -Recurse -Force "v2ray-windows-64" "$OutDir\windows\v2ray-windows-64"
 Copy-Item -Recurse -Force "v2ray-linux-64" "$OutDir\linux\v2ray-linux-64"

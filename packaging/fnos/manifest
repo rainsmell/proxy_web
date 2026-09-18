@@ -1,0 +1,16 @@
+appname               = v2rayweb
+version               = 0.1.6
+display_name          = V2Ray Web
+desc                  = V2Ray Web manager for subscriptions, node list, latency test, SOCKS5/HTTP proxy and connection logs.
+platform              = x86
+source                = thirdparty
+maintainer            = local
+distributor           = local
+os_min_version        = 1.2.0401
+desktop_uidir         = ui
+desktop_applaunchname = v2rayweb.main
+ctl_stop              = true
+install_type          =
+service_port          = 8080
+checkport             = true
+changelog             = Map subscription fp=ios to V2Ray uTLS ios_14 and keep jsonv5 runtime validation.

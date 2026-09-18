@@ -1,0 +1,7 @@
+{
+  "defaults": {
+    "run-as": "package"
+  },
+  "username": "v2rayweb",
+  "groupname": "v2rayweb"
+}

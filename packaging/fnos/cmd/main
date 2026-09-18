@@ -1,0 +1,188 @@
+#!/bin/bash
+set -u
+
+PID_FILE="${TRIM_PKGVAR}/v2ray-web.pid"
+LOG_FILE="${TRIM_PKGVAR}/service.log"
+PORT="${TRIM_SERVICE_PORT:-8080}"
+GATEWAY_PREFIX="/app/v2rayweb"
+
+log_msg() {
+    mkdir -p "${TRIM_PKGVAR}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+fail() {
+    log_msg "ERROR: $1"
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    fi
+    exit 1
+}
+
+first_existing_file() {
+    for p in "$@"; do
+        if [ -f "$p" ]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_paths() {
+    APP_BIN=$(first_existing_file \
+        "${TRIM_APPDEST}/v2ray-web" \
+        "${TRIM_APPDEST}/app/v2ray-web") || return 1
+
+    CORE_BIN=$(first_existing_file \
+        "${TRIM_APPDEST}/v2ray-linux-64/v2ray" \
+        "${TRIM_APPDEST}/app/v2ray-linux-64/v2ray") || return 1
+
+    ASSET_DIR="$(dirname "${CORE_BIN}")"
+    APP_DIR="$(dirname "${APP_BIN}")"
+    APP_SOCKET="${TRIM_APPDEST}/app.sock"
+    return 0
+}
+
+check_process() {
+    local pid="$1"
+    [ -n "${pid}" ] || return 1
+    kill -0 "${pid}" 2>/dev/null || return 1
+    if [ -r "/proc/${pid}/cmdline" ]; then
+        tr '\0' ' ' < "/proc/${pid}/cmdline" | grep -q "v2ray-web" || return 1
+    fi
+    return 0
+}
+
+status_process() {
+    if [ -r "${PID_FILE}" ]; then
+        local pid
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+wait_http() {
+    local count=0
+    while [ ${count} -lt 10 ]; do
+        if command -v curl >/dev/null 2>&1; then
+            curl --unix-socket "${APP_SOCKET}" -fsS "http://v2rayweb/healthz" >/dev/null 2>&1 && return 0
+        else
+            [ -S "${APP_SOCKET}" ] && return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+    return 1
+}
+
+start_process() {
+    if status_process; then
+        log_msg "Already running."
+        return 0
+    fi
+
+    resolve_paths || fail "Missing binaries. TRIM_APPDEST=${TRIM_APPDEST}; expected v2ray-web and v2ray-linux-64/v2ray under TRIM_APPDEST or TRIM_APPDEST/app"
+    chmod +x "${APP_BIN}" "${CORE_BIN}" 2>/dev/null || true
+    mkdir -p "${TRIM_PKGVAR}/runtime"
+    rm -f "${APP_SOCKET}"
+
+    export V2RAY_WEB_DATA_DIR="${TRIM_PKGVAR}"
+    export V2RAY_WEB_UNIX_SOCKET="${APP_SOCKET}"
+    export V2RAY_WEB_BASE_PATH="${GATEWAY_PREFIX}"
+    export V2RAY_CORE_PATH="${CORE_BIN}"
+    export V2RAY_LOCATION_ASSET="${ASSET_DIR}"
+
+    log_msg "Starting V2Ray Web"
+    log_msg "TRIM_APPDEST=${TRIM_APPDEST}"
+    log_msg "TRIM_PKGVAR=${TRIM_PKGVAR}"
+    log_msg "TRIM_SERVICE_PORT=${TRIM_SERVICE_PORT:-}"
+    log_msg "APP_BIN=${APP_BIN}"
+    log_msg "CORE_BIN=${CORE_BIN}"
+    log_msg "APP_DIR=${APP_DIR}"
+    log_msg "APP_SOCKET=${APP_SOCKET}"
+    log_msg "GATEWAY_PREFIX=${GATEWAY_PREFIX}"
+
+    cd "${APP_DIR}" || fail "Cannot enter ${APP_DIR}"
+    nohup "${APP_BIN}" >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+    echo "${pid}" > "${PID_FILE}"
+    sleep 1
+
+    if ! check_process "${pid}"; then
+        rm -f "${PID_FILE}"
+        fail "V2Ray Web process exited immediately. Check ${LOG_FILE}."
+    fi
+
+    if ! wait_http; then
+        log_msg "Health check failed on unix socket ${APP_SOCKET}"
+        return 1
+    fi
+
+    log_msg "Started PID=${pid}, socket=${APP_SOCKET}"
+    return 0
+}
+
+stop_process() {
+    resolve_paths >/dev/null 2>&1 || true
+
+    if [ ! -r "${PID_FILE}" ]; then
+        log_msg "PID file not found; nothing to stop."
+        [ -n "${APP_SOCKET:-}" ] && rm -f "${APP_SOCKET}"
+        return 0
+    fi
+
+    local pid
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if ! check_process "${pid}"; then
+        rm -f "${PID_FILE}"
+        [ -n "${APP_SOCKET:-}" ] && rm -f "${APP_SOCKET}"
+        log_msg "Stale PID file/socket removed."
+        return 0
+    fi
+
+    log_msg "Stopping PID=${pid}"
+    kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1 || true
+
+    local count=0
+    while check_process "${pid}" && [ ${count} -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+    done
+
+    if check_process "${pid}"; then
+        log_msg "Force killing PID=${pid}"
+        kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    if [ -n "${CORE_BIN:-}" ]; then
+        pkill -f "${CORE_BIN}.*${TRIM_PKGVAR}/runtime/config" >> "${LOG_FILE}" 2>&1 || true
+    fi
+    rm -f "${PID_FILE}"
+    [ -n "${APP_SOCKET:-}" ] && rm -f "${APP_SOCKET}"
+    log_msg "Stopped."
+    return 0
+}
+
+case "${1:-}" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status_process; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    echo "Usage: $0 {start|stop|status}" >&2
+    exit 1
+    ;;
+esac

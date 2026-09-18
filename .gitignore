@@ -6,3 +6,7 @@ tmp/
 *.log
 *.tmp
 v2ray-web.exe
+fnos-utils/
+*.fpk
+packaging/fnos/app/v2ray-web
+packaging/fnos/app/v2ray-linux-64/

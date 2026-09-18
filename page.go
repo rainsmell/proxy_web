@@ -784,7 +784,9 @@ const pageHTML = `<!doctype html>
     return "delay bad";
   }
 
+  var API_BASE = (window.__BASE_PATH__ || "").replace(/\/+$/, "");
   async function request(path, options) {
+    if (API_BASE && path.charAt(0) === "/") path = API_BASE + path;
     var controller = new AbortController();
     var timeout = setTimeout(function () { controller.abort(); }, 30000);
     try {

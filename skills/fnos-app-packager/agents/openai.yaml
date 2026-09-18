@@ -1,0 +1,3 @@
+display_name: fnOS App Packager
+short_description: Package and debug native fnOS FPK apps.
+default_prompt: Use this skill to create, package, version, and debug native fnOS FPK applications.

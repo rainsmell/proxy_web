@@ -1,0 +1,15 @@
+{
+  ".url": {
+    "v2rayweb.main": {
+      "title": "V2Ray Web",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "port": "",
+      "gatewayPrefix": "/app/v2rayweb",
+      "gatewaySocket": "app.sock",
+      "url": "/app/v2rayweb",
+      "allUsers": true
+    }
+  }
+}
