@@ -25,8 +25,16 @@ $env:GOOS = "linux"
 $env:GOARCH = "amd64"
 go build -trimpath -ldflags "-s -w -X main.appVersion=$Version" -o "$OutDir\linux\v2ray-web" .
 
-Copy-Item -Recurse -Force "v2ray-windows-64" "$OutDir\windows\v2ray-windows-64"
-Copy-Item -Recurse -Force "v2ray-linux-64" "$OutDir\linux\v2ray-linux-64"
+if (-not (Test-Path "mihomo-linux-64\mihomo") -or -not (Test-Path "mihomo-windows-64\mihomo.exe")) {
+    Write-Host "未找到 mihomo 内核，正在尝试下载..."
+    & (Join-Path $PSScriptRoot "scripts\fetch-core.ps1") -Target all
+}
+if (-not (Test-Path "mihomo-linux-64\mihomo") -or -not (Test-Path "mihomo-windows-64\mihomo.exe")) {
+    throw "缺少 mihomo 内核。请运行 scripts\fetch-core.ps1 或手动放置 mihomo-linux-64\mihomo 与 mihomo-windows-64\mihomo.exe。"
+}
+
+Copy-Item -Recurse -Force "mihomo-windows-64" "$OutDir\windows\mihomo-windows-64"
+Copy-Item -Recurse -Force "mihomo-linux-64" "$OutDir\linux\mihomo-linux-64"
 Copy-Item -Force "README.md" "$OutDir\windows\README.md"
 Copy-Item -Force "README.md" "$OutDir\linux\README.md"
 
@@ -36,6 +44,9 @@ Windows:
 
 Linux:
   ./v2ray-web
+
+Proxy core:
+  mihomo (Clash.Meta)
 
 The Go toolchain is not required on the target machine.
 "@ | Set-Content -Encoding UTF8 "$OutDir\README.txt"

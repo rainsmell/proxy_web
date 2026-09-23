@@ -1,7 +1,7 @@
 appname               = v2rayweb
-version               = 0.1.6
-display_name          = V2Ray Web
-desc                  = V2Ray Web manager for subscriptions, node list, latency test, SOCKS5/HTTP proxy and connection logs.
+version               = 0.2.4
+display_name          = Mihomo Web
+desc                  = Mihomo (Clash.Meta) based manager for subscriptions, node list, latency test, SOCKS5/HTTP proxy and live connections.
 platform              = x86
 source                = thirdparty
 maintainer            = local
@@ -13,4 +13,4 @@ ctl_stop              = true
 install_type          =
 service_port          = 8080
 checkport             = true
-changelog             = Map subscription fp=ios to V2Ray uTLS ios_14 and keep jsonv5 runtime validation.
+changelog             = Bundle the mihomo -compatible core (GOAMD64=v1) so it runs on NAS CPUs without x86-64-v3/AVX2; clearer hint when a v3 core is used on an unsupported CPU.

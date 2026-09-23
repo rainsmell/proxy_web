@@ -20,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 var appVersion = "dev"
@@ -46,6 +48,30 @@ type Node struct {
 	ProxyDelay  int64     `json:"proxyDelay,omitempty"`
 	TestError   string    `json:"testError,omitempty"`
 	TestedAt    time.Time `json:"testedAt,omitempty"`
+
+	// Extended fields used by the mihomo runtime and extra protocols.
+	Security             string `json:"security,omitempty"`
+	PublicKey            string `json:"publicKey,omitempty"`
+	ShortID              string `json:"shortId,omitempty"`
+	Token                string `json:"token,omitempty"`
+	ALPN                 string `json:"alpn,omitempty"`
+	SkipCertVerify       bool   `json:"skipCertVerify,omitempty"`
+	SSRProtocol          string `json:"ssrProtocol,omitempty"`
+	SSRProtocolParam     string `json:"ssrProtocolParam,omitempty"`
+	SSRObfs              string `json:"ssrObfs,omitempty"`
+	SSRObfsParam         string `json:"ssrObfsParam,omitempty"`
+	Obfs                 string `json:"obfs,omitempty"`
+	ObfsPassword         string `json:"obfsPassword,omitempty"`
+	CongestionController string `json:"congestionController,omitempty"`
+	UDPRelayMode         string `json:"udpRelayMode,omitempty"`
+	UpMbps               int    `json:"upMbps,omitempty"`
+	DownMbps             int    `json:"downMbps,omitempty"`
+	SnellVersion         int    `json:"snellVersion,omitempty"`
+	// Proxy holds a native mihomo mapping for nodes imported from a Clash
+	// YAML subscription. When set it is emitted verbatim into the runtime
+	// config, which makes every mihomo protocol usable without dedicated
+	// share-link parsing.
+	Proxy map[string]any `json:"proxy,omitempty"`
 }
 type Subscription struct {
 	ID        string    `json:"id"`
@@ -60,6 +86,8 @@ type Config struct {
 	HTTPPort       int            `json:"httpPort"`
 	DomainStrategy string         `json:"domainStrategy"`
 	LogLevel       string         `json:"logLevel"`
+	TestURL        string         `json:"testUrl"`
+	TestTimeout    int            `json:"testTimeout"`
 	Subscriptions  []Subscription `json:"subscriptions"`
 }
 type State struct {
@@ -84,10 +112,11 @@ type Connection struct {
 	Time   string `json:"time"`
 }
 type TestProgress struct {
-	ID          string `json:"id"`
-	Total, Done int    `json:"total"`
-	Running     bool   `json:"running"`
-	Error       string `json:"error,omitempty"`
+	ID      string `json:"id"`
+	Total   int    `json:"total"`
+	Done    int    `json:"done"`
+	Running bool   `json:"running"`
+	Error   string `json:"error,omitempty"`
 }
 
 var cfg = Config{ListenAddress: "0.0.0.0", SocksPort: 10808, HTTPPort: 10809, DomainStrategy: "AsIs", LogLevel: "info"}
@@ -218,7 +247,7 @@ func installSignalHandler() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("shutdown signal received; stopping v2ray child process if running")
+		log.Printf("shutdown signal received; stopping mihomo child process if running")
 		stopProxyInternal()
 		os.Exit(0)
 	}()
@@ -276,6 +305,12 @@ func loadConfig() {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
+	if cfg.TestURL == "" {
+		cfg.TestURL = defaultTestURL
+	}
+	if cfg.TestTimeout < 1000 || cfg.TestTimeout > 32767 {
+		cfg.TestTimeout = defaultTestTimeout
+	}
 }
 func saveConfig() error {
 	storeMu.Lock()
@@ -310,7 +345,7 @@ func api(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, cfg)
 	case p == "config" && r.Method == "PUT":
 		var c Config
-		if bodyJSON(r, &c) != nil || c.SocksPort < 1 || c.SocksPort > 65535 || c.HTTPPort < 1 || c.HTTPPort > 65535 || !validDomainStrategy(c.DomainStrategy) || !validLogLevel(c.LogLevel) {
+		if bodyJSON(r, &c) != nil || c.SocksPort < 1 || c.SocksPort > 65535 || c.HTTPPort < 1 || c.HTTPPort > 65535 || !validDomainStrategy(c.DomainStrategy) || !validLogLevel(c.LogLevel) || !validTestURL(c.TestURL) || (c.TestTimeout != 0 && (c.TestTimeout < 1000 || c.TestTimeout > 32767)) {
 			jsonOut(w, 400, map[string]string{"error": "invalid config or port"})
 			return
 		}
@@ -324,6 +359,14 @@ func api(w http.ResponseWriter, r *http.Request) {
 		cfg.LogLevel = c.LogLevel
 		if cfg.LogLevel == "" {
 			cfg.LogLevel = "info"
+		}
+		cfg.TestURL = c.TestURL
+		if cfg.TestURL == "" {
+			cfg.TestURL = defaultTestURL
+		}
+		cfg.TestTimeout = c.TestTimeout
+		if cfg.TestTimeout == 0 {
+			cfg.TestTimeout = defaultTestTimeout
 		}
 		_ = saveConfig()
 		jsonOut(w, 200, cfg)
@@ -383,7 +426,7 @@ func api(w http.ResponseWriter, r *http.Request) {
 		procMu.Unlock()
 		jsonOut(w, 200, s)
 	case p == "proxy/logs" && r.Method == "GET":
-		jsonOut(w, 200, tailLog("error.log", 100))
+		jsonOut(w, 200, tailLog("process.log", 100))
 	case p == "proxy/start" && r.Method == "POST":
 		startProxy(w, r)
 	case p == "proxy/stop" && r.Method == "POST":
@@ -409,6 +452,15 @@ func validLogLevel(v string) bool {
 	default:
 		return false
 	}
+}
+
+func validTestURL(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return true
+	}
+	u, err := url.Parse(v)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 func deleteSubscription(w http.ResponseWriter, id string) {
@@ -466,14 +518,27 @@ func refresh(w http.ResponseWriter, id string) {
 
 func parseSubscription(raw string) []Node {
 	raw = strings.TrimSpace(raw)
-	compact := strings.Join(strings.Fields(raw), "")
-	if d, e := base64.StdEncoding.DecodeString(compact); e == nil && strings.Contains(string(d), "://") {
-		raw = string(d)
+	if raw == "" {
+		return nil
 	}
+
+	// Subscription payloads are usually base64 encoded, either a list of share
+	// links or a full Clash/mihomo YAML document.
+	decoded := raw
+	if b, e := decodeBase64(strings.Join(strings.Fields(raw), "")); e == nil {
+		decoded = string(b)
+	}
+
+	// Clash YAML subscriptions carry native proxy mappings and cover every
+	// protocol mihomo supports, so prefer them when present.
+	if nodes := parseClashYAML(decoded); len(nodes) > 0 {
+		return nodes
+	}
+
 	var out []Node
-	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r", ""), "\n") {
+	for _, line := range strings.Split(strings.ReplaceAll(decoded, "\r", ""), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		var n Node
@@ -485,12 +550,21 @@ func parseSubscription(raw string) []Node {
 			n, e = parseVLESS(line)
 		case strings.HasPrefix(line, "trojan://"):
 			n, e = parseTrojan(line)
+		case strings.HasPrefix(line, "ssr://"):
+			n, e = parseSSR(line)
 		case strings.HasPrefix(line, "ss://"):
 			n, e = parseSS(line)
+		case strings.HasPrefix(line, "hysteria2://"), strings.HasPrefix(line, "hy2://"):
+			n, e = parseHysteria2(line)
+		case strings.HasPrefix(line, "hysteria://"):
+			n, e = parseHysteria(line)
+		case strings.HasPrefix(line, "tuic://"):
+			n, e = parseTUIC(line)
 		default:
 			continue
 		}
 		if e == nil && n.Address != "" && n.Port > 0 {
+			n.Protocol = normalizeProtocol(n.Protocol)
 			n.ID = hash(line)
 			n.Raw = line
 			out = append(out, n)
@@ -498,25 +572,80 @@ func parseSubscription(raw string) []Node {
 	}
 	return out
 }
-func parseVMess(s string) (Node, error) {
-	b, e := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(s, "vmess://"))
-	if e != nil {
-		b, e = base64.StdEncoding.DecodeString(strings.TrimPrefix(s, "vmess://"))
+
+// parseClashYAML extracts native mihomo proxy mappings from a Clash YAML
+// subscription document.
+func parseClashYAML(text string) []Node {
+	if text == "" || !strings.Contains(text, "proxies") {
+		return nil
 	}
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil
+	}
+	var out []Node
+	for _, p := range doc.Proxies {
+		server := anyString(p["server"])
+		port := anyInt(p["port"])
+		if server == "" || port <= 0 {
+			continue
+		}
+		raw, _ := json.Marshal(p)
+		n := Node{
+			ID:       hash(string(raw)),
+			Name:     anyString(p["name"]),
+			Protocol: normalizeProtocol(anyString(p["type"])),
+			Address:  server,
+			Port:     port,
+			Proxy:    p,
+			Raw:      string(raw),
+		}
+		// Mirror a few common fields so the node list and TCP test still work.
+		n.UUID = anyString(p["uuid"])
+		n.Password = anyString(p["password"])
+		n.Method = anyString(p["cipher"])
+		n.Security = anyString(p["cipher"])
+		n.Network = anyString(p["network"])
+		n.SNI = firstNonEmpty(anyString(p["servername"]), anyString(p["sni"]))
+		n.TLS = anyBool(p["tls"])
+		out = append(out, n)
+	}
+	return out
+}
+
+func parseVMess(s string) (Node, error) {
+	b, e := decodeBase64(strings.TrimPrefix(s, "vmess://"))
 	if e != nil {
 		return Node{}, e
 	}
 	var x struct {
-		PS, Add, ID, Net, TLS, SNI, Host, Path string
-		Port                                   any
-		Aid                                    int
-		V                                      string
+		PS, Add, ID, Net, TLS, SNI, Host, Path, Scy, Alpn, Fp, Type string
+		Port                                                        any
+		Aid                                                         any
+		V                                                           string
 	}
 	if e = json.Unmarshal(b, &x); e != nil {
 		return Node{}, e
 	}
-	return Node{Name: x.PS, Protocol: "vmess", Address: x.Add, Port: toInt(x.Port), UUID: x.ID, AlterID: x.Aid, Network: x.Net, TLS: x.TLS != "", SNI: x.SNI, Host: x.Host, Path: x.Path}, nil
+	return Node{
+		Name: x.PS, Protocol: "vmess", Address: x.Add, Port: toInt(x.Port),
+		UUID: x.ID, AlterID: toInt(x.Aid), Security: x.Scy,
+		Network: x.Net, TLS: vmessTLS(x.TLS), SNI: x.SNI, Host: x.Host, Path: x.Path,
+		Fingerprint: x.Fp, ALPN: x.Alpn,
+	}, nil
 }
+
+func vmessTLS(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none", "false", "0":
+		return false
+	default:
+		return true
+	}
+}
+
 func parseVLESS(s string) (Node, error) {
 	u, e := url.Parse(s)
 	if e != nil {
@@ -524,8 +653,26 @@ func parseVLESS(s string) (Node, error) {
 	}
 	q := u.Query()
 	p, _ := strconv.Atoi(u.Port())
-	return Node{Name: u.Fragment, Protocol: "vless", Address: u.Hostname(), Port: p, UUID: u.User.Username(), Network: q.Get("type"), TLS: q.Get("security") == "tls" || q.Get("security") == "reality", SNI: q.Get("sni"), Host: q.Get("host"), Path: q.Get("path"), Flow: q.Get("flow"), Fingerprint: q.Get("fp")}, nil
+	security := strings.ToLower(q.Get("security"))
+	return Node{
+		Name:        fragmentName(u),
+		Protocol:    "vless",
+		Address:     u.Hostname(),
+		Port:        p,
+		UUID:        u.User.Username(),
+		Network:     q.Get("type"),
+		TLS:         security == "tls" || security == "reality" || security == "xtls",
+		SNI:         q.Get("sni"),
+		Host:        q.Get("host"),
+		Path:        firstNonEmpty(q.Get("path"), q.Get("serviceName")),
+		Flow:        q.Get("flow"),
+		Fingerprint: q.Get("fp"),
+		PublicKey:   q.Get("pbk"),
+		ShortID:     q.Get("sid"),
+		ALPN:        q.Get("alpn"),
+	}, nil
 }
+
 func parseTrojan(s string) (Node, error) {
 	u, e := url.Parse(s)
 	if e != nil {
@@ -533,8 +680,23 @@ func parseTrojan(s string) (Node, error) {
 	}
 	q := u.Query()
 	p, _ := strconv.Atoi(u.Port())
-	return Node{Name: u.Fragment, Protocol: "trojan", Address: u.Hostname(), Port: p, Password: u.User.Username(), Network: q.Get("type"), TLS: q.Get("security") != "none", SNI: q.Get("sni"), Host: q.Get("host"), Path: q.Get("path"), Fingerprint: q.Get("fp")}, nil
+	return Node{
+		Name:           fragmentName(u),
+		Protocol:       "trojan",
+		Address:        u.Hostname(),
+		Port:           p,
+		Password:       u.User.Username(),
+		Network:        q.Get("type"),
+		TLS:            strings.ToLower(q.Get("security")) != "none",
+		SNI:            q.Get("sni"),
+		Host:           q.Get("host"),
+		Path:           firstNonEmpty(q.Get("path"), q.Get("serviceName")),
+		Fingerprint:    q.Get("fp"),
+		ALPN:           q.Get("alpn"),
+		SkipCertVerify: truthy(firstNonEmpty(q.Get("allowInsecure"), q.Get("allowinsecure"), q.Get("insecure"))),
+	}, nil
 }
+
 func parseSS(s string) (Node, error) {
 	u, e := url.Parse(s)
 	if e != nil {
@@ -544,15 +706,124 @@ func parseSS(s string) (Node, error) {
 	user := u.User.Username()
 	pass, _ := u.User.Password()
 	if pass == "" {
-		if b, d := base64.RawStdEncoding.DecodeString(user); d == nil {
+		if b, d := decodeBase64(user); d == nil {
 			z := strings.SplitN(string(b), ":", 2)
 			if len(z) == 2 {
 				user, pass = z[0], z[1]
 			}
 		}
 	}
-	return Node{Name: u.Fragment, Protocol: "shadowsocks", Address: u.Hostname(), Port: p, Method: user, Password: pass}, nil
+	return Node{Name: fragmentName(u), Protocol: "shadowsocks", Address: u.Hostname(), Port: p, Method: user, Password: pass}, nil
 }
+
+func parseSSR(s string) (Node, error) {
+	b, e := decodeBase64(strings.TrimPrefix(s, "ssr://"))
+	if e != nil {
+		return Node{}, e
+	}
+	main, query, _ := strings.Cut(string(b), "/?")
+	parts := strings.SplitN(main, ":", 6)
+	if len(parts) != 6 {
+		return Node{}, fmt.Errorf("invalid ssr link")
+	}
+	port, _ := strconv.Atoi(parts[1])
+	password, _ := decodeBase64(parts[5])
+	q, _ := url.ParseQuery(query)
+	return Node{
+		Name:             decodeB64String(q.Get("remarks")),
+		Protocol:         "ssr",
+		Address:          parts[0],
+		Port:             port,
+		Method:           parts[3],
+		Password:         string(password),
+		SSRProtocol:      parts[2],
+		SSRObfs:          parts[4],
+		SSRObfsParam:     decodeB64String(q.Get("obfsparam")),
+		SSRProtocolParam: decodeB64String(q.Get("protoparam")),
+	}, nil
+}
+
+func parseHysteria2(s string) (Node, error) {
+	u, e := url.Parse(s)
+	if e != nil {
+		return Node{}, e
+	}
+	q := u.Query()
+	p, _ := strconv.Atoi(u.Port())
+	return Node{
+		Name:           fragmentName(u),
+		Protocol:       "hysteria2",
+		Address:        u.Hostname(),
+		Port:           p,
+		Password:       userInfo(u),
+		SNI:            firstNonEmpty(q.Get("sni"), q.Get("peer")),
+		Obfs:           q.Get("obfs"),
+		ObfsPassword:   firstNonEmpty(q.Get("obfs-password"), q.Get("obfsPassword")),
+		SkipCertVerify: truthy(firstNonEmpty(q.Get("insecure"), q.Get("allowInsecure"))),
+		ALPN:           q.Get("alpn"),
+		UpMbps:         atoiSafe(q.Get("upmbps")),
+		DownMbps:       atoiSafe(q.Get("downmbps")),
+	}, nil
+}
+
+func parseHysteria(s string) (Node, error) {
+	u, e := url.Parse(s)
+	if e != nil {
+		return Node{}, e
+	}
+	q := u.Query()
+	p, _ := strconv.Atoi(u.Port())
+	auth := firstNonEmpty(q.Get("auth"), q.Get("auth_str"), q.Get("authStr"))
+	if auth == "" {
+		auth = userInfo(u)
+	}
+	return Node{
+		Name:           fragmentName(u),
+		Protocol:       "hysteria",
+		Address:        u.Hostname(),
+		Port:           p,
+		Password:       auth,
+		Obfs:           q.Get("protocol"),
+		SNI:            firstNonEmpty(q.Get("peer"), q.Get("sni")),
+		SkipCertVerify: truthy(firstNonEmpty(q.Get("insecure"), q.Get("allowInsecure"))),
+		ALPN:           q.Get("alpn"),
+		UpMbps:         atoiSafe(firstNonEmpty(q.Get("upmbps"), q.Get("up_mbps"))),
+		DownMbps:       atoiSafe(firstNonEmpty(q.Get("downmbps"), q.Get("down_mbps"))),
+	}, nil
+}
+
+func parseTUIC(s string) (Node, error) {
+	u, e := url.Parse(s)
+	if e != nil {
+		return Node{}, e
+	}
+	q := u.Query()
+	p, _ := strconv.Atoi(u.Port())
+	user, pass := "", ""
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+	}
+	n := Node{
+		Name:                 fragmentName(u),
+		Protocol:             "tuic",
+		Address:              u.Hostname(),
+		Port:                 p,
+		SNI:                  q.Get("sni"),
+		ALPN:                 q.Get("alpn"),
+		SkipCertVerify:       truthy(firstNonEmpty(q.Get("allow_insecure"), q.Get("allowInsecure"), q.Get("insecure"))),
+		CongestionController: firstNonEmpty(q.Get("congestion_control"), q.Get("congestion-controller")),
+		UDPRelayMode:         firstNonEmpty(q.Get("udp_relay_mode"), q.Get("udp-relay-mode")),
+	}
+	if pass == "" && !looksLikeUUID(user) {
+		n.Token = user
+	} else {
+		n.UUID = user
+		n.Password = pass
+	}
+	return n, nil
+}
+
 func toInt(v any) int {
 	switch x := v.(type) {
 	case float64:
@@ -564,13 +835,147 @@ func toInt(v any) int {
 	return 0
 }
 
+func decodeBase64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty base64 input")
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("invalid base64 input")
+}
+
+func decodeB64String(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if b, e := decodeBase64(s); e == nil {
+		return string(b)
+	}
+	return s
+}
+
+func fragmentName(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.Fragment != "" {
+		return u.Fragment
+	}
+	return u.RawFragment
+}
+
+func userInfo(u *url.URL) string {
+	if u == nil || u.User == nil {
+		return ""
+	}
+	return u.User.String()
+}
+
+func looksLikeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func atoiSafe(s string) int {
+	i, _ := strconv.Atoi(strings.TrimSpace(s))
+	return i
+}
+
+func anyString(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		return fmt.Sprint(x)
+	}
+}
+
+func anyInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case string:
+		i, _ := strconv.Atoi(strings.TrimSpace(x))
+		return i
+	default:
+		return 0
+	}
+}
+
+func anyBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return truthy(x)
+	default:
+		return false
+	}
+}
+
+func normalizeProtocol(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "ss", "shadowsocks":
+		return "shadowsocks"
+	case "ssr", "shadowsocksr":
+		return "shadowsocksr"
+	case "":
+		return ""
+	default:
+		return strings.ToLower(strings.TrimSpace(p))
+	}
+}
+
 func testOne(w http.ResponseWriter, id string) {
 	n, ok := findNode(id)
 	if !ok {
 		jsonOut(w, 404, map[string]string{"error": "not found"})
 		return
 	}
-	testNode(&n)
+	probe, perr := startProbeForNodes([]Node{n})
+	if probe != nil {
+		defer probe.close()
+	}
+	testNode(&n, probe)
+	if probe == nil && perr != nil {
+		applyProxyDelay(&n, 0, fmt.Errorf("proxy 测速不可用: %v", perr))
+	}
 	updateNode(n)
 	jsonOut(w, 200, n)
 }
@@ -582,14 +987,63 @@ func startTestAll(w http.ResponseWriter) {
 	p := progress[id]
 	progressMu.Unlock()
 	go func() {
-		sem := make(chan struct{}, 4)
+		probe, perr := startProbeForNodes(nodes)
+		if probe != nil {
+			defer probe.close()
+		}
+
+		// Bulk proxy latency: mihomo tests each chunk concurrently and returns
+		// all results in a single response per chunk.
+		var proxyDelays map[string]int64
+		if probe != nil {
+			if d, err := probe.groupDelayAll(probeTestURL(), probeTestTimeoutMs()); err != nil {
+				log.Printf("group proxy delay test failed: %v", err)
+				appendRuntimeLog("group proxy delay test failed: %v", err)
+			} else {
+				proxyDelays = d
+			}
+		}
+
+		workers := 16
+		if proxyDelays == nil && probe == nil {
+			// No shared probe: each node needs its own core, keep it modest.
+			workers = 4
+		}
+		sem := make(chan struct{}, workers)
 		var wg sync.WaitGroup
 		for _, n := range nodes {
 			wg.Add(1)
 			go func(n Node) {
 				defer wg.Done()
 				sem <- struct{}{}
-				testNode(&n)
+				testNodeTCP(&n)
+				switch {
+				case proxyDelays != nil:
+					if d, ok := proxyDelays[probe.names[n.ID]]; ok {
+						applyProxyDelay(&n, d, nil)
+					} else {
+						// The concurrent group test may time out borderline nodes,
+						// so retry this one on its own before giving up.
+						d, err := probe.delay(n.ID, probeTestURL(), probeTestTimeoutMs())
+						applyProxyDelay(&n, d, err)
+					}
+				case probe != nil:
+					d, err := probe.delay(n.ID, probeTestURL(), probeTestTimeoutMs())
+					applyProxyDelay(&n, d, err)
+				default:
+					np, err := startProxyProbe([]Node{n})
+					if err != nil {
+						reason := err
+						if perr != nil {
+							reason = perr
+						}
+						applyProxyDelay(&n, 0, fmt.Errorf("proxy 测速不可用: %v", reason))
+					} else {
+						d, derr := np.delay(n.ID, probeTestURL(), probeTestTimeoutMs())
+						np.close()
+						applyProxyDelay(&n, d, derr)
+					}
+				}
 				<-sem
 				updateNode(n)
 				progressMu.Lock()
@@ -608,17 +1062,6 @@ func startTestAll(w http.ResponseWriter) {
 	}()
 	jsonOut(w, 202, p)
 }
-func testNode(n *Node) {
-	st := time.Now()
-	c, e := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", n.Address, n.Port), 10*time.Second)
-	if e == nil {
-		c.Close()
-		n.TCPDelay = time.Since(st).Milliseconds()
-	} else {
-		n.TestError = e.Error()
-	}
-	n.TestedAt = time.Now()
-}
 func updateNode(n Node) {
 	for si := range cfg.Subscriptions {
 		for ni := range cfg.Subscriptions[si].Nodes {
@@ -630,35 +1073,6 @@ func updateNode(n Node) {
 	_ = saveConfig()
 }
 
-func readConnections() []Connection {
-	b, e := os.ReadFile(filepath.Join(dataDir, "runtime", "access.log"))
-	if e != nil {
-		return []Connection{}
-	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) > 200 {
-		lines = lines[len(lines)-200:]
-	}
-	out := make([]Connection, 0, len(lines))
-	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		pos := strings.Index(line, " accepted ")
-		status := "accepted"
-		if pos < 0 {
-			pos = strings.Index(line, " rejected ")
-			status = "rejected"
-		}
-		if pos < 0 {
-			continue
-		}
-		prefix, rest := line[:pos], line[pos+len(" accepted "):]
-		if status == "rejected" {
-			rest = line[pos+len(" rejected "):]
-		}
-		out = append(out, Connection{ID: hash(fmt.Sprintf("%d-%s", i, line)), Source: prefix, Target: rest, Status: status})
-	}
-	return out
-}
 func tailLog(name string, n int) []string {
 	b, e := os.ReadFile(filepath.Join(dataDir, "runtime", name))
 	if e != nil {

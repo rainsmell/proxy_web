@@ -59,7 +59,7 @@ function Resolve-Fnpack() {
 }
 
 if (-not (Test-Path $TemplateDir)) { throw "Missing template dir: $TemplateDir" }
-if (-not (Test-Path (Join-Path $Root "v2ray-linux-64\v2ray"))) { throw "Missing Linux V2Ray core: v2ray-linux-64\v2ray" }
+if (-not (Test-Path (Join-Path $Root "mihomo-linux-64\mihomo"))) { throw "Missing Linux mihomo core: mihomo-linux-64\mihomo (run scripts\fetch-core.ps1 -Target linux)" }
 
 Assert-InRoot $OutFull
 Assert-InRoot $StageDir
@@ -96,7 +96,7 @@ finally {
     $env:CGO_ENABLED = $oldCGO
 }
 
-Copy-Item -Path (Join-Path $Root "v2ray-linux-64") -Destination (Join-Path $appDir "v2ray-linux-64") -Recurse -Force
+Copy-Item -Path (Join-Path $Root "mihomo-linux-64") -Destination (Join-Path $appDir "mihomo-linux-64") -Recurse -Force
 
 $fnpack = Resolve-Fnpack
 Push-Location $OutFull

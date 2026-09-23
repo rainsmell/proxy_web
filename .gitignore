@@ -1,5 +1,6 @@
 data/
 v2ray-core/
+mihomo-core/
 release/
 dist/
 tmp/
@@ -9,4 +10,8 @@ v2ray-web.exe
 fnos-utils/
 *.fpk
 packaging/fnos/app/v2ray-web
-packaging/fnos/app/v2ray-linux-64/
+packaging/fnos/app/mihomo-linux-64/
+# Bundled mihomo core binaries: fetch with scripts/fetch-core.sh or scripts/fetch-core.ps1
+mihomo-linux-64/mihomo
+mihomo-windows-64/mihomo.exe
+v2ray-web

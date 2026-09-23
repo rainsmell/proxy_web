@@ -1,8 +1,8 @@
 {
   ".url": {
     "v2rayweb.main": {
-      "title": "V2Ray Web",
-      "icon": "images/icon_{0}.png",
+      "title": "Mihomo Web",
+      "icon": "images/icon_v2_{0}.png",
       "type": "iframe",
       "protocol": "",
       "port": "",

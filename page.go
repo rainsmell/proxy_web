@@ -5,7 +5,7 @@ const pageHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>V2Ray 控制台</title>
+  <title>Mihomo 控制台</title>
   <style>
     :root {
       color-scheme: light;
@@ -567,7 +567,7 @@ const pageHTML = `<!doctype html>
     <header class="header">
       <div class="header-inner">
         <div class="title">
-          <h1>V2Ray 控制台</h1>
+          <h1>Mihomo 控制台</h1>
           <p>节点选择、订阅刷新、代理启动和运行观测</p>
         </div>
         <div class="status-strip">
@@ -636,7 +636,13 @@ const pageHTML = `<!doctype html>
                   <input id="http" type="number" min="1" max="65535">
                 </label>
               </div>
-              <button id="save-config" class="secondary" type="button">保存端口</button>
+              <label class="field">测速地址
+                <input id="test-url" placeholder="http://www.gstatic.com/generate_204">
+              </label>
+              <label class="field">测速超时（毫秒，1000-32767）
+                <input id="test-timeout" type="number" min="1000" max="32767">
+              </label>
+              <button id="save-config" class="secondary" type="button">保存配置</button>
               <div class="message warn">当前无登录认证，只适合受信任网络使用。</div>
             </div>
           </div>
@@ -653,6 +659,11 @@ const pageHTML = `<!doctype html>
               <option value="vmess">VMess</option>
               <option value="trojan">Trojan</option>
               <option value="shadowsocks">Shadowsocks</option>
+              <option value="ssr">ShadowsocksR</option>
+              <option value="hysteria2">Hysteria2</option>
+              <option value="hysteria">Hysteria</option>
+              <option value="tuic">TUIC</option>
+              <option value="snell">Snell</option>
             </select>
             <div class="actions">
               <button id="test-all" class="secondary" type="button">全部测速</button>
@@ -693,7 +704,7 @@ const pageHTML = `<!doctype html>
             <div class="panel-head">
               <div>
                 <h2>最近连接</h2>
-                <div class="caption">来自 V2Ray access.log</div>
+                <div class="caption">来自 Mihomo 活动连接</div>
               </div>
             </div>
             <div class="table-wrap conn-table">
@@ -828,6 +839,8 @@ const pageHTML = `<!doctype html>
       E("addr").value = c.listenAddress || "0.0.0.0";
       E("socks").value = c.socksPort || 10808;
       E("http").value = c.httpPort || 10809;
+      E("test-url").value = c.testUrl || "http://www.gstatic.com/generate_204";
+      E("test-timeout").value = c.testTimeout || 5000;
       setText("metric-socks", c.socksPort || "-");
       setText("metric-http", c.httpPort || "-");
     } catch (e) {
@@ -1187,10 +1200,12 @@ const pageHTML = `<!doctype html>
         body: JSON.stringify({
           listenAddress: E("addr").value.trim() || "0.0.0.0",
           socksPort: Number(E("socks").value),
-          httpPort: Number(E("http").value)
+          httpPort: Number(E("http").value),
+          testUrl: E("test-url").value.trim(),
+          testTimeout: Number(E("test-timeout").value)
         })
       });
-      toast("端口配置已保存");
+      toast("配置已保存");
       await loadConfig();
     } catch (e) {
       toast(e.message);

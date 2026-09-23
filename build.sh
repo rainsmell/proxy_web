@@ -15,14 +15,23 @@ mkdir -p "$OUT_DIR/windows" "$OUT_DIR/linux"
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.appVersion=$VERSION" -o "$OUT_DIR/windows/v2ray-web.exe" .
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.appVersion=$VERSION" -o "$OUT_DIR/linux/v2ray-web" .
 
-cp -R v2ray-windows-64 "$OUT_DIR/windows/"
-cp -R v2ray-linux-64 "$OUT_DIR/linux/"
+if [ ! -f mihomo-linux-64/mihomo ] || [ ! -f mihomo-windows-64/mihomo.exe ]; then
+  echo "未找到 mihomo 内核，正在尝试下载..." >&2
+  bash scripts/fetch-core.sh all || {
+    echo "请手动准备 mihomo-linux-64/mihomo 与 mihomo-windows-64/mihomo.exe，或运行 scripts/fetch-core.sh" >&2
+    exit 1
+  }
+fi
+
+cp -R mihomo-windows-64 "$OUT_DIR/windows/"
+cp -R mihomo-linux-64 "$OUT_DIR/linux/"
 cp README.md "$OUT_DIR/windows/README.md"
 cp README.md "$OUT_DIR/linux/README.md"
 cat > "$OUT_DIR/README.txt" <<'EOF'
 Windows: v2ray-web.exe
 Linux: ./v2ray-web
 
+Proxy core: mihomo (Clash.Meta)
 The Go toolchain is not required on the target machine.
 EOF
 

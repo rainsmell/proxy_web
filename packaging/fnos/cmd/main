@@ -35,10 +35,11 @@ resolve_paths() {
         "${TRIM_APPDEST}/app/v2ray-web") || return 1
 
     CORE_BIN=$(first_existing_file \
+        "${TRIM_APPDEST}/mihomo-linux-64/mihomo" \
+        "${TRIM_APPDEST}/app/mihomo-linux-64/mihomo" \
         "${TRIM_APPDEST}/v2ray-linux-64/v2ray" \
         "${TRIM_APPDEST}/app/v2ray-linux-64/v2ray") || return 1
 
-    ASSET_DIR="$(dirname "${CORE_BIN}")"
     APP_DIR="$(dirname "${APP_BIN}")"
     APP_SOCKET="${TRIM_APPDEST}/app.sock"
     return 0
@@ -86,7 +87,7 @@ start_process() {
         return 0
     fi
 
-    resolve_paths || fail "Missing binaries. TRIM_APPDEST=${TRIM_APPDEST}; expected v2ray-web and v2ray-linux-64/v2ray under TRIM_APPDEST or TRIM_APPDEST/app"
+    resolve_paths || fail "Missing binaries. TRIM_APPDEST=${TRIM_APPDEST}; expected v2ray-web and mihomo-linux-64/mihomo under TRIM_APPDEST or TRIM_APPDEST/app"
     chmod +x "${APP_BIN}" "${CORE_BIN}" 2>/dev/null || true
     mkdir -p "${TRIM_PKGVAR}/runtime"
     rm -f "${APP_SOCKET}"
@@ -94,10 +95,10 @@ start_process() {
     export V2RAY_WEB_DATA_DIR="${TRIM_PKGVAR}"
     export V2RAY_WEB_UNIX_SOCKET="${APP_SOCKET}"
     export V2RAY_WEB_BASE_PATH="${GATEWAY_PREFIX}"
+    export MIHOMO_CORE_PATH="${CORE_BIN}"
     export V2RAY_CORE_PATH="${CORE_BIN}"
-    export V2RAY_LOCATION_ASSET="${ASSET_DIR}"
 
-    log_msg "Starting V2Ray Web"
+    log_msg "Starting Mihomo Web"
     log_msg "TRIM_APPDEST=${TRIM_APPDEST}"
     log_msg "TRIM_PKGVAR=${TRIM_PKGVAR}"
     log_msg "TRIM_SERVICE_PORT=${TRIM_SERVICE_PORT:-}"
@@ -115,7 +116,7 @@ start_process() {
 
     if ! check_process "${pid}"; then
         rm -f "${PID_FILE}"
-        fail "V2Ray Web process exited immediately. Check ${LOG_FILE}."
+        fail "Web process exited immediately. Check ${LOG_FILE}."
     fi
 
     if ! wait_http; then
