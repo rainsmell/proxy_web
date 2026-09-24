@@ -1,4 +1,4 @@
-# v2ray-web
+# proxy-web
 
 基于本地 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash.Meta）内核的轻量 Web 管理程序。
 
